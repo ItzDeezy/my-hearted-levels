@@ -4,7 +4,7 @@
 
 using namespace geode::prelude;
 
-// ─── Helpers ───────────────────────────────────────────────
+// Helpers
 
 static std::string levelKey(GJGameLevel* level) {
     if (!level) return "";
@@ -24,7 +24,7 @@ static void setFavorited(GJGameLevel* level, bool state) {
 // persists filter state within a session but resets on game relaunch
 static bool s_filterActive = false;
 
-// ─── Hook 1: LevelCell ─────────────────────────────────────
+//Hook 1: LevelCell (heart per cell)
 
 class $modify(MyLevelCell, LevelCell) {
 
@@ -89,7 +89,7 @@ class $modify(MyLevelCell, LevelCell) {
     }
 };
 
-// ─── Hook 2: LevelBrowserLayer ─────────────────────────────
+// Hook 2: LevelBrowserLayer (heart filter button + pagination)
 
 class $modify(MyLevelBrowser, LevelBrowserLayer) {
 

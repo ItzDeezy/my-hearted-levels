@@ -8,9 +8,10 @@
     },
     "id": "deezy.my-hearted-levels",
     "name": "My Hearted Levels",
-    "version": "v1.0.0",
+    "version": "v1.0.1",
     "developer": "Deezy",
     "description": "Heart and filter your created levels.",
+	"tags": ["universal", "offline", "interface", "utility"],
     "dependencies": {
         "geode.node-ids": ">=v1.20.0"
     }
