@@ -24,7 +24,7 @@ static void setFavorited(GJGameLevel* level, bool state) {
 // persists filter state within a session but resets on game relaunch
 static bool s_filterActive = false;
 
-//Hook 1: LevelCell (heart per cell)
+// Hook 1: LevelCell (heart per cell)
 
 class $modify(MyLevelCell, LevelCell) {
 
@@ -95,6 +95,7 @@ class $modify(MyLevelBrowser, LevelBrowserLayer) {
 
     struct Fields {
         bool filterActive = false;
+        bool isMyLevels = false;
         CCMenuItemSpriteExtra* filterBtn = nullptr;
         int favPage = 0;
         std::string pendingCountStr = "";
@@ -121,34 +122,39 @@ class $modify(MyLevelBrowser, LevelBrowserLayer) {
             if (auto title = list->getChildByID("title"))
                 static_cast<CCLabelBMFont*>(title)->setString("My Favorited Levels");
         }
-
         if (auto l = static_cast<CCLabelBMFont*>(this->getChildByID("level-count-label")))
             l->setString(m_fields->pendingCountStr.c_str());
-
-        // hide GD's pagination completely
         if (auto n = this->getChildByID("next-page-menu")) n->setVisible(false);
         if (auto p = this->getChildByID("prev-page-menu")) p->setVisible(false);
         if (auto m = this->getChildByID("page-menu"))      m->setVisible(false);
-
-        // show our own buttons based on actual fav page
         bool hasNext = m_fields->favPage < m_fields->pendingTotalPages - 1;
         bool hasPrev = m_fields->favPage > 0;
-
         if (m_fields->favPageMenu) m_fields->favPageMenu->setVisible(true);
         if (m_fields->favNextBtn)  m_fields->favNextBtn->setVisible(hasNext);
         if (m_fields->favPrevBtn)  m_fields->favPrevBtn->setVisible(hasPrev);
     }
 
+    void resetNormalUI() {
+        if (auto n = this->getChildByID("next-page-menu")) n->setVisible(true);
+        if (auto p = this->getChildByID("prev-page-menu")) p->setVisible(true);
+        if (auto m = this->getChildByID("page-menu"))      m->setVisible(true);
+        if (m_fields->favPageMenu) m_fields->favPageMenu->setVisible(false);
+        if (auto list = this->getChildByID("GJListLayer")) {
+            if (auto title = list->getChildByID("title"))
+                static_cast<CCLabelBMFont*>(title)->setString("My Levels");
+        }
+    }
+
     bool init(GJSearchObject* searchObj) {
-        // restore session filter state BEFORE calling original
-        // — loadLevelsFinished fires inside it
-        if (searchObj->m_searchType == SearchType::MyLevels) {
+        m_fields->isMyLevels = (searchObj->m_searchType == SearchType::MyLevels);
+
+        if (m_fields->isMyLevels) {
             m_fields->filterActive = s_filterActive;
             m_fields->favPage = 0;
         }
 
         if (!LevelBrowserLayer::init(searchObj)) return false;
-        if (searchObj->m_searchType != SearchType::MyLevels) return true;
+        if (!m_fields->isMyLevels) return true;
 
         // ── filter toggle button ──
         auto spr = CCSprite::createWithSpriteFrameName(
@@ -198,7 +204,6 @@ class $modify(MyLevelBrowser, LevelBrowserLayer) {
         favPageMenu->addChild(nextBtn);
         favPageMenu->setVisible(false);
 
-        // mirror GD's arrow positions
         auto winSize = CCDirector::get()->getWinSize();
         prevBtn->setPosition({-winSize.width / 2.f + 24.f, 0.f});
         nextBtn->setPosition({ winSize.width / 2.f - 24.f, 0.f});
@@ -213,54 +218,31 @@ class $modify(MyLevelBrowser, LevelBrowserLayer) {
     }
 
     void loadLevelsFinished(CCArray* levels, const char* key, int p2) {
-        if (m_fields->filterActive) {
-            auto allFavs = getFavoritedLevels();
-            int total = (int)allFavs->count();
-            int pageSize = 10;
-            int totalPages = std::max(1, (total + pageSize - 1) / pageSize);
-
-            // clamp page index
-            m_fields->favPage = std::max(0, std::min(m_fields->favPage, totalPages - 1));
-
-            // slice 10 levels for this page
-            auto pageItems = CCArray::create();
-            int start = m_fields->favPage * pageSize;
-            int end = std::min(start + pageSize, total);
-            for (int i = start; i < end; i++) {
-                pageItems->addObject(allFavs->objectAtIndex(i));
-            }
-
-            LevelBrowserLayer::loadLevelsFinished(pageItems, key, p2);
-
-            // store state for the scheduled UI update
-            int dispStart = total > 0 ? start + 1 : 0;
-            m_fields->pendingCountStr = std::to_string(dispStart) + " TO " +
-                                        std::to_string(end) + " OF " +
-                                        std::to_string(total);
-            m_fields->pendingTotalPages = totalPages;
-
-            // delay one frame so GD doesn't overwrite our changes
-            this->unschedule(SEL_SCHEDULE(&MyLevelBrowser::updateFavUI));
-            this->scheduleOnce(SEL_SCHEDULE(&MyLevelBrowser::updateFavUI), 0.f);
-
-        } else {
-            // restore GD's menus BEFORE calling loadLevelsFinished
-            // so it correctly sets button states inside them
-            if (auto n = this->getChildByID("next-page-menu")) n->setVisible(true);
-            if (auto p = this->getChildByID("prev-page-menu")) p->setVisible(true);
-            if (auto m = this->getChildByID("page-menu"))      m->setVisible(true);
-
+        // not My Levels tab — do absolutely nothing custom
+        if (!m_fields->isMyLevels || !m_fields->filterActive) {
             LevelBrowserLayer::loadLevelsFinished(levels, key, p2);
-
-            // restore title
-            if (auto list = this->getChildByID("GJListLayer")) {
-                if (auto title = list->getChildByID("title"))
-                    static_cast<CCLabelBMFont*>(title)->setString("My Levels");
-            }
-
-            // hide our custom buttons
-            if (m_fields->favPageMenu) m_fields->favPageMenu->setVisible(false);
+            return;
         }
+
+        // filter is active — slice favorites for current page
+        auto allFavs = getFavoritedLevels();
+        int total = (int)allFavs->count();
+        int pageSize = 10;
+        int totalPages = std::max(1, (total + pageSize - 1) / pageSize);
+        m_fields->favPage = std::max(0, std::min(m_fields->favPage, totalPages - 1));
+        auto pageItems = CCArray::create();
+        int start = m_fields->favPage * pageSize;
+        int end = std::min(start + pageSize, total);
+        for (int i = start; i < end; i++)
+            pageItems->addObject(allFavs->objectAtIndex(i));
+        LevelBrowserLayer::loadLevelsFinished(pageItems, key, p2);
+        int dispStart = total > 0 ? start + 1 : 0;
+        m_fields->pendingCountStr = std::to_string(dispStart) + " TO " +
+                                    std::to_string(end) + " OF " +
+                                    std::to_string(total);
+        m_fields->pendingTotalPages = totalPages;
+        this->unschedule(SEL_SCHEDULE(&MyLevelBrowser::updateFavUI));
+        this->scheduleOnce(SEL_SCHEDULE(&MyLevelBrowser::updateFavUI), 0.f);
     }
 
     void onFavNext(CCObject*) {
@@ -276,15 +258,12 @@ class $modify(MyLevelBrowser, LevelBrowserLayer) {
     void onFavFilter(CCObject*) {
         m_fields->filterActive = !m_fields->filterActive;
         m_fields->favPage = 0;
-
-        // persist within session
         s_filterActive = m_fields->filterActive;
-
         auto frame = CCSpriteFrameCache::get()->spriteFrameByName(
             m_fields->filterActive ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
         );
         static_cast<CCSprite*>(m_fields->filterBtn->getNormalImage())->setDisplayFrame(frame);
-
+        if (!m_fields->filterActive) resetNormalUI();
         this->onRefresh(nullptr);
     }
 };
