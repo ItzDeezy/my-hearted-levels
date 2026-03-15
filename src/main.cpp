@@ -4,27 +4,27 @@
 
 using namespace geode::prelude;
 
-// Helpers
-
-static std::string levelKey(GJGameLevel* level) {
-    if (!level) return "";
-    int id = (int)level->m_levelID;
-    if (id > 0) return "id_" + std::to_string(id);
-    return "local_" + std::string(level->m_levelName);
+// quick helper to get a unique key per level
+static std::string getLevelKey(GJGameLevel* lvl) {
+    if (!lvl) return "";
+    int id = (int)lvl->m_levelID;
+    if (id > 0)
+        return "id_" + std::to_string(id);
+    return "local_" + std::string(lvl->m_levelName);
 }
 
-static bool isFavorited(GJGameLevel* level) {
-    return Mod::get()->getSavedValue<bool>("fav_" + levelKey(level), false);
+static bool isFav(GJGameLevel* lvl) {
+    return Mod::get()->getSavedValue<bool>("fav_" + getLevelKey(lvl), false);
 }
 
-static void setFavorited(GJGameLevel* level, bool state) {
-    Mod::get()->setSavedValue("fav_" + levelKey(level), state);
+static void saveFav(GJGameLevel* lvl, bool val) {
+    Mod::get()->setSavedValue("fav_" + getLevelKey(lvl), val);
 }
 
-// persists filter state within a session but resets on game relaunch
-static bool s_filterActive = false;
+// keeps filter on while the game is open and resets on restart
+static bool g_filterOn = false;
 
-// Hook 1: LevelCell (heart per cell)
+// heart button on each level cell
 
 class $modify(MyLevelCell, LevelCell) {
 
@@ -32,113 +32,120 @@ class $modify(MyLevelCell, LevelCell) {
         CCMenuItemSpriteExtra* heartBtn = nullptr;
     };
 
-    void loadFromLevel(GJGameLevel* level) {
-        LevelCell::loadFromLevel(level);
+    void loadFromLevel(GJGameLevel* lvl) {
+        LevelCell::loadFromLevel(lvl);
 
-        if (!level || !level->m_isEditable) return;
+        // only show heart on editable (local) levels
+        if (!lvl || !lvl->m_isEditable) return;
         if (!m_mainMenu || !m_toggler) return;
 
-        bool hearted = isFavorited(level);
+        bool faved = isFav(lvl);
 
-        // cell recycled — just update sprite
+        // if button already exists just swap the sprite
         if (m_fields->heartBtn) {
             auto frame = CCSpriteFrameCache::get()->spriteFrameByName(
-                hearted ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
+                faved ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
             );
             static_cast<CCSprite*>(m_fields->heartBtn->getNormalImage())->setDisplayFrame(frame);
             return;
         }
 
         auto spr = CCSprite::createWithSpriteFrameName(
-            hearted ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
+            faved ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
         );
         spr->setScale(0.77f);
 
-        auto btn = CCMenuItemSpriteExtra::create(
-            spr, this,
-            menu_selector(MyLevelCell::onHeartBtn)
-        );
+        auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(MyLevelCell::onHeart));
         btn->stopAllActions();
-        btn->setScale(1.0f);
-        btn->setSizeMult(1.0f);
+        btn->setScale(1.f);
+        btn->setSizeMult(1.f);
 
-        auto checkboxPos = this->convertToNodeSpace(
+        // put it just to the left of the checkbox (with offsetting)
+        auto cbPos = this->convertToNodeSpace(
             m_toggler->getParent()->convertToWorldSpace(m_toggler->getPosition())
         );
-        btn->setPosition({checkboxPos.x - 30.f, checkboxPos.y});
+        btn->setPosition({ cbPos.x - 30.f, cbPos.y });
         btn->setID("fav-heart-btn"_spr);
 
         m_fields->heartBtn = btn;
 
         auto menu = CCMenu::create();
-        menu->setPosition({0.f, 0.f});
+        menu->setPosition(ccp(0, 0));
         menu->addChild(btn);
         this->addChild(menu, 10);
     }
 
-    void onHeartBtn(CCObject*) {
+    void onHeart(CCObject*) {
         if (!m_level || !m_fields->heartBtn) return;
 
-        bool newState = !isFavorited(m_level);
-        setFavorited(m_level, newState);
+        bool newVal = !isFav(m_level);
+        saveFav(m_level, newVal);
 
         auto frame = CCSpriteFrameCache::get()->spriteFrameByName(
-            newState ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
+            newVal ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
         );
         static_cast<CCSprite*>(m_fields->heartBtn->getNormalImage())->setDisplayFrame(frame);
     }
 };
 
-// Hook 2: LevelBrowserLayer (heart filter button + pagination)
+// filter (basically show only the level that are favorited)
 
 class $modify(MyLevelBrowser, LevelBrowserLayer) {
 
     struct Fields {
         bool filterActive = false;
-        bool isMyLevels = false;
-        CCMenuItemSpriteExtra* filterBtn = nullptr;
-        int favPage = 0;
-        std::string pendingCountStr = "";
-        int pendingTotalPages = 1;
+        bool isMyLevels   = false;
+
+        CCMenuItemSpriteExtra* filterBtn  = nullptr;
         CCMenuItemSpriteExtra* favPrevBtn = nullptr;
         CCMenuItemSpriteExtra* favNextBtn = nullptr;
-        CCMenu* favPageMenu = nullptr;
+        CCMenu* favNavMenu = nullptr;
+
+        int  favPage        = 0;
+        int  totalFavPages  = 1;
+        std::string countLabel = "";
     };
 
-    CCArray* getFavoritedLevels() {
-        auto result = CCArray::create();
-        auto allLevels = LocalLevelManager::get()->m_localLevels;
-        if (allLevels) {
-            for (unsigned int i = 0; i < allLevels->count(); i++) {
-                auto level = static_cast<GJGameLevel*>(allLevels->objectAtIndex(i));
-                if (level && isFavorited(level)) result->addObject(level);
-            }
+    // grab all local levels that are hearted
+    CCArray* collectFavs() {
+        auto out = CCArray::create();
+        auto locals = LocalLevelManager::get()->m_localLevels;
+        if (!locals) return out;
+        for (unsigned int i = 0; i < locals->count(); i++) {
+            auto lvl = static_cast<GJGameLevel*>(locals->objectAtIndex(i));
+            if (lvl && isFav(lvl)) out->addObject(lvl);
         }
-        return result;
+        return out;
     }
 
-    void updateFavUI(float) {
+    void applyFavUI(float) {
+        // rename the list header
         if (auto list = this->getChildByID("GJListLayer")) {
             if (auto title = list->getChildByID("title"))
                 static_cast<CCLabelBMFont*>(title)->setString("My Favorited Levels");
         }
-        if (auto l = static_cast<CCLabelBMFont*>(this->getChildByID("level-count-label")))
-            l->setString(m_fields->pendingCountStr.c_str());
+
+        // update count text
+        if (auto lbl = static_cast<CCLabelBMFont*>(this->getChildByID("level-count-label")))
+            lbl->setString(m_fields->countLabel.c_str());
+
+        // hide the normal nav, show ours
         if (auto n = this->getChildByID("next-page-menu")) n->setVisible(false);
         if (auto p = this->getChildByID("prev-page-menu")) p->setVisible(false);
         if (auto m = this->getChildByID("page-menu"))      m->setVisible(false);
-        bool hasNext = m_fields->favPage < m_fields->pendingTotalPages - 1;
-        bool hasPrev = m_fields->favPage > 0;
-        if (m_fields->favPageMenu) m_fields->favPageMenu->setVisible(true);
-        if (m_fields->favNextBtn)  m_fields->favNextBtn->setVisible(hasNext);
-        if (m_fields->favPrevBtn)  m_fields->favPrevBtn->setVisible(hasPrev);
+
+        if (m_fields->favNavMenu) m_fields->favNavMenu->setVisible(true);
+        if (m_fields->favNextBtn) m_fields->favNextBtn->setVisible(m_fields->favPage < m_fields->totalFavPages - 1);
+        if (m_fields->favPrevBtn) m_fields->favPrevBtn->setVisible(m_fields->favPage > 0);
     }
 
-    void resetNormalUI() {
+    void restoreNormalUI() {
         if (auto n = this->getChildByID("next-page-menu")) n->setVisible(true);
         if (auto p = this->getChildByID("prev-page-menu")) p->setVisible(true);
         if (auto m = this->getChildByID("page-menu"))      m->setVisible(true);
-        if (m_fields->favPageMenu) m_fields->favPageMenu->setVisible(false);
+        if (m_fields->favNavMenu) m_fields->favNavMenu->setVisible(false);
+
+        // reset title
         if (auto list = this->getChildByID("GJListLayer")) {
             if (auto title = list->getChildByID("title"))
                 static_cast<CCLabelBMFont*>(title)->setString("My Levels");
@@ -149,121 +156,119 @@ class $modify(MyLevelBrowser, LevelBrowserLayer) {
         m_fields->isMyLevels = (searchObj->m_searchType == SearchType::MyLevels);
 
         if (m_fields->isMyLevels) {
-            m_fields->filterActive = s_filterActive;
+            m_fields->filterActive = g_filterOn;
             m_fields->favPage = 0;
         }
 
         if (!LevelBrowserLayer::init(searchObj)) return false;
         if (!m_fields->isMyLevels) return true;
 
-        // ── filter toggle button ──
-        auto spr = CCSprite::createWithSpriteFrameName(
+        // filter toggle (on and off)
+        auto filterSpr = CCSprite::createWithSpriteFrameName(
             m_fields->filterActive ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
         );
-        spr->setScale(0.95f);
+        filterSpr->setScale(0.95f);
 
-        auto btn = CCMenuItemSpriteExtra::create(
-            spr, this, menu_selector(MyLevelBrowser::onFavFilter)
+        auto filterBtn = CCMenuItemSpriteExtra::create(
+            filterSpr, this, menu_selector(MyLevelBrowser::onToggleFilter)
         );
-        btn->stopAllActions();
-        btn->setScale(1.0f);
-        btn->setSizeMult(1.0f);
-        m_fields->filterBtn = btn;
+        filterBtn->stopAllActions();
+        filterBtn->setScale(1.f);
+        filterBtn->setSizeMult(1.f);
+        m_fields->filterBtn = filterBtn;
 
         auto filterMenu = CCMenu::create();
-        filterMenu->addChild(btn);
+        filterMenu->addChild(filterBtn);
 
-        float btnX = 27.f;
-        float btnY = CCDirector::get()->getWinSize().height - 175.f;
+        // try to anchor near existing ui elements
+        float bx = 27.f;
+        float by = CCDirector::get()->getWinSize().height - 175.f;
         if (auto anchor = this->getChildByID("my-levels-menu")) {
-            btnX = anchor->getPositionX() + 40.f;
-            btnY = anchor->getPositionY() - anchor->getContentSize().height / 2.f + 17.f;
-        } else if (auto searchBtn = this->getChildByID("search-button")) {
-            btnX = searchBtn->getPositionX();
-            btnY = searchBtn->getPositionY() - 90.f;
+            bx = anchor->getPositionX() + 40.f;
+            by = anchor->getPositionY() - anchor->getContentSize().height / 2.f + 17.f;
+        } else if (auto sb = this->getChildByID("search-button")) {
+            bx = sb->getPositionX();
+            by = sb->getPositionY() - 90.f;
         }
-        filterMenu->setPosition(btnX, btnY);
+        filterMenu->setPosition(bx, by);
         this->addChild(filterMenu, 10);
 
-        // ── our own prev/next buttons for fav pagination ──
+        // a c'ustom favorite page navigation (similar to the normal gd)
         auto prevSpr = CCSprite::createWithSpriteFrameName("GJ_arrow_01_001.png");
-        auto prevBtn = CCMenuItemSpriteExtra::create(
-            prevSpr, this, menu_selector(MyLevelBrowser::onFavPrev)
-        );
-        prevBtn->setSizeMult(1.0f);
+        auto prevBtn = CCMenuItemSpriteExtra::create(prevSpr, this, menu_selector(MyLevelBrowser::onFavPrev));
+        prevBtn->setSizeMult(1.f);
 
         auto nextSpr = CCSprite::createWithSpriteFrameName("GJ_arrow_01_001.png");
         nextSpr->setFlipX(true);
-        auto nextBtn = CCMenuItemSpriteExtra::create(
-            nextSpr, this, menu_selector(MyLevelBrowser::onFavNext)
-        );
-        nextBtn->setSizeMult(1.0f);
+        auto nextBtn = CCMenuItemSpriteExtra::create(nextSpr, this, menu_selector(MyLevelBrowser::onFavNext));
+        nextBtn->setSizeMult(1.f);
 
-        auto favPageMenu = CCMenu::create();
-        favPageMenu->addChild(prevBtn);
-        favPageMenu->addChild(nextBtn);
-        favPageMenu->setVisible(false);
-
-        auto winSize = CCDirector::get()->getWinSize();
-        prevBtn->setPosition({-winSize.width / 2.f + 24.f, 0.f});
-        nextBtn->setPosition({ winSize.width / 2.f - 24.f, 0.f});
-        favPageMenu->setPosition(winSize.width / 2.f, winSize.height / 2.f);
+        auto navMenu = CCMenu::create();
+        navMenu->addChild(prevBtn);
+        navMenu->addChild(nextBtn);
+        navMenu->setVisible(false);
+        auto ws = CCDirector::get()->getWinSize();
+        prevBtn->setPosition({ -ws.width / 2.f + 24.f, 0.f });
+        nextBtn->setPosition({  ws.width / 2.f - 24.f, 0.f });
+        navMenu->setPosition(ws.width / 2.f, ws.height / 2.f);
 
         m_fields->favPrevBtn = prevBtn;
-        m_fields->favNextBtn = nextBtn;
-        m_fields->favPageMenu = favPageMenu;
-        this->addChild(favPageMenu, 10);
+            m_fields->favNextBtn = nextBtn;
+        m_fields->favNavMenu = navMenu;
+        this->addChild(navMenu, 10);
 
         return true;
     }
 
     void loadLevelsFinished(CCArray* levels, const char* key, int p2) {
-        // not My Levels tab — do absolutely nothing custom
         if (!m_fields->isMyLevels || !m_fields->filterActive) {
             LevelBrowserLayer::loadLevelsFinished(levels, key, p2);
             return;
         }
+        auto favs     = collectFavs();
+        int  total    = (int)favs->count();
+        int  pageSize = 10; // copying the vanilla one (kinda)
+        int  pages    = std::max(1, (total + pageSize - 1) / pageSize);
 
-        // filter is active — slice favorites for current page
-        auto allFavs = getFavoritedLevels();
-        int total = (int)allFavs->count();
-        int pageSize = 10;
-        int totalPages = std::max(1, (total + pageSize - 1) / pageSize);
-        m_fields->favPage = std::max(0, std::min(m_fields->favPage, totalPages - 1));
-        auto pageItems = CCArray::create();
+        m_fields->favPage = std::max(0, std::min(m_fields->favPage, pages - 1));
+
+        // slice out the current page
+        auto slice = CCArray::create();
         int start = m_fields->favPage * pageSize;
-        int end = std::min(start + pageSize, total);
+        int end   = std::min(start + pageSize, total);
         for (int i = start; i < end; i++)
-            pageItems->addObject(allFavs->objectAtIndex(i));
-        LevelBrowserLayer::loadLevelsFinished(pageItems, key, p2);
+            slice->addObject(favs->objectAtIndex(i));
+
+        LevelBrowserLayer::loadLevelsFinished(slice, key, p2);
+
         int dispStart = total > 0 ? start + 1 : 0;
-        m_fields->pendingCountStr = std::to_string(dispStart) + " TO " +
-                                    std::to_string(end) + " OF " +
-                                    std::to_string(total);
-        m_fields->pendingTotalPages = totalPages;
-        this->unschedule(SEL_SCHEDULE(&MyLevelBrowser::updateFavUI));
-        this->scheduleOnce(SEL_SCHEDULE(&MyLevelBrowser::updateFavUI), 0.f);
+        m_fields->countLabel   = std::to_string(dispStart) + " TO " + std::to_string(end) + " OF " + std::to_string(total);
+        m_fields->totalFavPages = pages;
+
+        this->unschedule(SEL_SCHEDULE(&MyLevelBrowser::applyFavUI));
+        this->scheduleOnce(SEL_SCHEDULE(&MyLevelBrowser::applyFavUI), 0.f);
     }
 
+    // "fake" page navigation cuz im using my own slice system
     void onFavNext(CCObject*) {
         m_fields->favPage++;
         this->onRefresh(nullptr);
     }
-
     void onFavPrev(CCObject*) {
         m_fields->favPage--;
         this->onRefresh(nullptr);
     }
-
-    void onFavFilter(CCObject*) {
+    void onToggleFilter(CCObject*) {
         m_fields->filterActive = !m_fields->filterActive;
         m_fields->favPage = 0;
-        s_filterActive = m_fields->filterActive;
+        g_filterOn = m_fields->filterActive;
+
         auto frame = CCSpriteFrameCache::get()->spriteFrameByName(
             m_fields->filterActive ? "gj_heartOn_001.png" : "gj_heartOff_001.png"
         );
         static_cast<CCSprite*>(m_fields->filterBtn->getNormalImage())->setDisplayFrame(frame);
-        if (!m_fields->filterActive) resetNormalUI();
+
+        if (!m_fields->filterActive) restoreNormalUI();
         this->onRefresh(nullptr);
     }
 };
