@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - "**"
+  release:
+    types: [published]
 
 jobs:
   build:
@@ -55,3 +57,9 @@ jobs:
         with:
           name: Build Output
           path: ${{ steps.build.outputs.build-output }}
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.build.outputs.build-output }}
